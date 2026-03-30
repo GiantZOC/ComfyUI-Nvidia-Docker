@@ -1,0 +1,6 @@
+docker compose -f ~/Source/ComfyUI-Nvidia-Docker/docker-compose.yml up -d
+
+rsync -avz steve@192.168.1.247:/home/steve/Source/ComfyUI/models /mnt/SSD850/Source/ComfyUI/models
+
+docker restart comfyui-nvidia
+docker compose restart

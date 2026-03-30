@@ -1,0 +1,139 @@
+# ComfyUI Nvidia Docker — DGX Spark / NVIDIA GB10 Blackwell (ARM64)
+# Based on compose-dgx_spark.yaml, adapted to use ../ComfyUI as basedir
+# so that the existing models, input, output, and user folders are shared.
+#
+# Pre-flight checklist (run once on the host):
+#   sudo nvidia-ctk runtime configure --runtime=docker
+#   sudo systemctl restart docker
+#   sudo usermod -aG docker $USER   # then log out & back in
+#   mkdir -p run
+#   chmod +x userscripts_dir/00-nvidiaDev.sh \
+#             userscripts_dir/01-unified-memory-patch.sh \
+#             userscripts_dir/05-customnodes_fixer.sh \
+#             userscripts_dir/11-onnxruntime-gpu.sh \
+#             userscripts_dir/12-xformers.sh \
+#             userscripts_dir/14-rmbg-DGX_Spark.sh \
+#             userscripts_dir/15-comfy_kitchen-DGX_Spark.sh \
+#             userscripts_dir/20-SageAttention2.sh \
+#             userscripts_dir/21-SageAttention3-BlackwellOnly.sh
+#
+# Copy .env.example to .env and fill in HF_TOKEN before first run.
+#
+# Start:  docker compose -f docker-compose.yml up -d
+# Logs:   docker compose -f docker-compose.yml logs -f
+# Stop:   docker compose -f docker-compose.yml down
+
+services:
+  comfyui-nvidia:
+    image: comfyui-nvidia-docker:ubuntu24_cuda13.1-dgx
+    container_name: comfyui-nvidia
+    ports:
+      - "8188:8188"
+    volumes:
+      # Userscripts that run inside the container at startup
+      - ./userscripts_dir:/userscripts_dir
+      # Container runtime state: venv, HF cache, ComfyUI checkout
+      - ./run:/comfy/mnt
+      # User data (models, input, output, user) shared from the ComfyUI repo folder
+      - ../ComfyUI:/basedir
+      # Keep container time in sync with the host
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    environment:
+      # ── PyTorch ─────────────────────────────────────────────────────────────
+      # Install PyTorch nightly for CUDA 13.1, required for the GB10 Blackwell.
+      PREINSTALL_TORCH_CMD: "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu130"
+      TORCH_CUDA_ARCH_LIST: "12.1"
+
+      # ── User identity ────────────────────────────────────────────────────────
+      # Match the host user so that files written by the container are owned by you.
+      WANTED_UID: "1000"
+      WANTED_GID: "1000"
+
+      # ── Data directory ───────────────────────────────────────────────────────
+      # Tells ComfyUI to use /basedir (mounted from ../ComfyUI above) for
+      # models, input, output, user, temp, and custom_nodes.
+      BASE_DIRECTORY: /basedir
+
+      # ── ComfyUI Manager ──────────────────────────────────────────────────────
+      USE_NEW_MANAGER: "true"
+      ENABLE_MANAGER_LEGACY_UI: "true"
+      SECURITY_LEVEL: weak
+
+      # ── GB10 Blackwell runtime flags ─────────────────────────────────────────
+      # --use-sage-attention   requires 20-SageAttention2.sh (and 21 for sageattn3)
+      # --disable-dynamic-vram ComfyUI's new Dynamic VRAM (stable since Mar 2026) does
+      #                        not work correctly on unified memory — disable it so models
+      #                        stay loaded between prompts and aren't constantly evicted.
+      # --disable-mmap         Prevents the safetensors loader from mmap-ing files into
+      #                        "RAM" before copying to "VRAM". On unified memory these are
+      #                        the same pool, so mmap effectively doubles model memory
+      #                        usage. Pair with the copy=False patch (01-unified-memory-patch.sh).
+      # --normalvram           Use ComfyUI's normal vram mode rather than letting it
+      #                        auto-detect (which falls to lowvram on GB10).
+      # --reserve-vram 1       Reserve 1 GB for system use — improves stability under load.
+      # --disable-pinned-memory Pinned memory is counterproductive on a unified memory
+      #                        fabric; disabling it reduces bus overhead.
+      # --dont-upcast-attention Keep attention ops in BF16/FP16 — no need to upcast on
+      #                        a native BF16 chip.
+      # --force-fp16           Enables the Flash Attention path in PyTorch.
+      COMFY_CMDLINE_EXTRA: "--normalvram --disable-dynamic-vram --reserve-vram 1 --disable-pinned-memory --disable-mmap --use-sage-attention --bf16-unet --bf16-vae --bf16-text-enc --dont-upcast-attention --force-fp16"
+
+      # Expose all GPUs; 'video' capability is needed for libnvcuvid.so
+      NVIDIA_VISIBLE_DEVICES: all
+
+      # ── Build & install tooling ──────────────────────────────────────────────
+      USE_UV: "true"
+
+      # FORCE_REINSTALL lets the userscripts rebuild from source on every start.
+      # Set to "false" (or remove) after all components have been built
+      # successfully to avoid the long rebuild on each container start.
+      FORCE_REINSTALL: "true"
+
+      # ── CUDA / GPU tuning ────────────────────────────────────────────────────
+      CUDA_HOME: /usr/local/cuda
+      # 4 GB kernel cache — gives ~3× rerun speedup on the DGX Spark.
+      CUDA_CACHE_MAXSIZE: "4294967296"
+      # Single GPU system — NCCL peer-to-peer is not needed.
+      NCCL_P2P_DISABLE: "1"
+
+      # ── Grace-Blackwell unified memory tuning ────────────────────────────────
+      # Let the unified memory manager handle allocations instead of PyTorch's
+      # CUDA caching allocator, which doesn't understand the shared fabric.
+      CUDA_MANAGED_FORCE_DEVICE_ALLOC: "1"
+      # torch.compile / Dynamo provide ~0% speedup on GB10 (compute-bound, not
+      # kernel-launch-bound) and Triton does not yet support sm_121a. Disable both.
+      TORCH_COMPILE_DISABLE: "1"
+      TORCHDYNAMO_DISABLE: "1"
+      # Load CUDA modules eagerly — faster first-inference after container start.
+      CUDA_MODULE_LOADING: "CUDA"
+      # Tune OpenMP thread count to the Grace CPU core count.
+      OMP_NUM_THREADS: "20"
+
+      # ── onnxruntime ──────────────────────────────────────────────────────────
+      # After onnxruntime has been built from source successfully the first time,
+      # uncomment the line below to stop it being rebuilt on every start.
+      # ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT: "true"
+
+      # ── HuggingFace ──────────────────────────────────────────────────────────
+      # Set HF_TOKEN=hf_... in the .env file — never commit the token.
+      HF_TOKEN: ${HF_TOKEN}
+      HF_HUB_DISABLE_TELEMETRY: "true"
+
+    # PyTorch recommended settings for GPU workloads:
+    #   memlock -1  → no limit on locked-in-memory pages
+    #   stack 64 MiB → matches PyTorch's recommended process stack size
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+                - compute
+                - utility
