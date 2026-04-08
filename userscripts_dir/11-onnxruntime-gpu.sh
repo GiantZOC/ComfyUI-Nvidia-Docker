@@ -145,7 +145,18 @@ if [ "A$must_build" == "Atrue" ]; then
 
     dd="/comfy/mnt/src/${BUILD_BASE}/$td/onnxruntime"
     if [ -d $dd ] && [ "$ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT" = "false" ]; then
-        echo "${LOG_WARN}WARNING:${NC} onnxruntime source already present, you must delete $dd to force reinstallation"
+        # Source already present — check if a pre-built wheel exists and install it
+        existing_wheel=$(find "$dd/build/Linux/Release/dist" -name "onnxruntime_gpu-*.whl" 2>/dev/null | head -1)
+        if [ -n "$existing_wheel" ]; then
+            echo "${LOG_INFO}INFO:${NC} Found pre-built wheel: $existing_wheel"
+            echo "${LOG_INFO}INFO:${NC} Installing from existing wheel (delete $dd to force full rebuild)"
+            source /comfy/mnt/venv/bin/activate || error_exit "Failed to activate virtualenv"
+            pip install "numpy<2" || error_exit "Failed to install numpy"
+            pip install "$existing_wheel" || error_exit "Failed to install onnxruntime-gpu wheel"
+            echo "${LOG_OK}SUCCESS:${NC} onnxruntime-gpu installed from pre-built wheel"
+            exit 0
+        fi
+        echo "${LOG_WARN}WARNING:${NC} onnxruntime source already present but no wheel found, you must delete $dd to force reinstallation"
         exit 0
     fi
 

@@ -58,6 +58,12 @@ RUN apt-get install -y --no-install-recommends libglvnd0 libglvnd-dev libegl1-me
   && echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3"}}' > /usr/share/vulkan/icd.d/nvidia_icd.json
 ENV MESA_D3D12_DEFAULT_ADAPTER_NAME="NVIDIA"
 
+# Add common git safe directories to prevent "dubious ownership" errors when
+# cm-cli.py fix all runs on /basedir and /comfy/mnt/ComfyUI (owned by one
+# user but executed as another). System-level config applies to all users.
+RUN git config --system --add safe.directory /basedir \
+    && git config --system --add safe.directory /comfy/mnt/ComfyUI
+
 ENV BUILD_FILE="/etc/image_base.txt"
 ARG BASE_DOCKER_FROM
 RUN echo "DOCKER_FROM: ${BASE_DOCKER_FROM}" | tee ${BUILD_FILE}

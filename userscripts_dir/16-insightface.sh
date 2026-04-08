@@ -2,7 +2,6 @@
 
 # Pre-requisites (run first):
 # - 00-nvidiaDev.sh
-# - 11-onnxruntime-gpu.sh  (insightface requires onnxruntime)
 
 # Install insightface from PyPI
 #
@@ -35,12 +34,6 @@ error_exit() {
 
 source /comfy/mnt/venv/bin/activate || error_exit "Failed to activate virtualenv"
 
-# Check if onnxruntime-gpu is installed (required by insightface)
-if ! pip show onnxruntime-gpu > /dev/null 2>&1; then
-    echo "${LOG_WARN}Warning:${NC} onnxruntime-gpu is not installed. insightface requires onnxruntime."
-    echo "         Run 11-onnxruntime-gpu.sh first, or insightface will fall back to CPU onnxruntime."
-fi
-
 # Check if insightface is already installed
 if pip show insightface > /dev/null 2>&1; then
     if [ "$FORCE_REINSTALL" = "false" ]; then
@@ -71,19 +64,6 @@ fi
 CMD="${PIP3_CMD} insightface"
 echo "CMD: \"${CMD}\""
 ${CMD} || error_exit "Failed to install insightface"
-
-# insightface pulls in CPU onnxruntime as a dependency, which conflicts with onnxruntime-gpu.
-# Remove the CPU version if the GPU version is present (or was present before this install).
-if pip show onnxruntime > /dev/null 2>&1; then
-    if pip show onnxruntime-gpu > /dev/null 2>&1; then
-        echo "${LOG_WARN}Warning:${NC} insightface installed CPU onnxruntime alongside GPU version. Removing CPU version..."
-        pip uninstall -y onnxruntime || error_exit "Failed to remove CPU onnxruntime"
-        echo "${LOG_INFO}INFO:${NC} CPU onnxruntime removed. GPU version retained."
-    else
-        echo "${LOG_WARN}Warning:${NC} Only CPU onnxruntime is present. Run 11-onnxruntime-gpu.sh to install the GPU version."
-    fi
-fi
-
 echo "${LOG_OK}SUCCESS:${NC} insightface installed"
 
 exit 0

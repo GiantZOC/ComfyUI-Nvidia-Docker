@@ -96,6 +96,9 @@ services:
       CUDA_CACHE_MAXSIZE: "4294967296"
       # Single GPU system — NCCL peer-to-peer is not needed.
       NCCL_P2P_DISABLE: "1"
+      # Serialize CUDA kernel launches — helps pinpoint CUDA errors in logs.
+      # Remove or set to 0 once stable (has a performance cost).
+      CUDA_LAUNCH_BLOCKING: "1"
 
       # ── Grace-Blackwell unified memory tuning ────────────────────────────────
       # Let the unified memory manager handle allocations instead of PyTorch's
