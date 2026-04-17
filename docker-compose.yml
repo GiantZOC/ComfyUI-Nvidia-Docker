@@ -88,7 +88,7 @@ services:
       # FORCE_REINSTALL lets the userscripts rebuild from source on every start.
       # Set to "false" (or remove) after all components have been built
       # successfully to avoid the long rebuild on each container start.
-      FORCE_REINSTALL: "true"
+      FORCE_REINSTALL: "false"
 
       # ── CUDA / GPU tuning ────────────────────────────────────────────────────
       CUDA_HOME: /usr/local/cuda
