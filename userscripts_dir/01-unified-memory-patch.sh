@@ -19,6 +19,12 @@
 # Pre-requisites:
 #   - COMFY_CMDLINE_EXTRA must include --disable-mmap (set in docker-compose.yml)
 #   - COMFYUI_PATH must be set (exported by init.bash before userscripts run)
+#
+# New in this version:
+#   Patch 2 — comfy/model_management.py: get_free_memory() fallback when
+#   torch.cuda.mem_get_info() returns (0, 0) on GB10 unified memory.
+#   Without this, ComfyUI thinks there's 0 MB free VRAM → triggers lowvram
+#   offloading → CUBLAS GEMM failures.
 
 set -e
 
@@ -29,6 +35,7 @@ error_exit() {
 }
 
 UTILS_FILE="${COMFYUI_PATH}/comfy/utils.py"
+MGMT_FILE="${COMFYUI_PATH}/comfy/model_management.py"
 
 echo ""
 echo "== Unified Memory Patch (copy=False fix)"
@@ -61,6 +68,16 @@ if grep -q 'tensor\.to(device=device, copy=False)' "${UTILS_FILE}"; then
   echo "   Patch applied successfully — copy=True → copy=False"
 else
   error_exit "Patch verification failed — copy=False not found after sed"
+fi
+
+# ── Patch 2: get_free_memory GB10 fallback ──────────────────────────
+echo ""
+echo "== Patch 2: model_management.py (get_free_memory fallback)"
+if [ -f "${MGMT_FILE}" ] && ! grep -q 'GB10_UNIFIED_FALLBACK' "${MGMT_FILE}"; then
+  sed -i '/mem_free_cuda, _ = torch.cuda.mem_get_info(dev)/a\            # GB10_UNIFIED_FALLBACK\n            if mem_free_cuda == 0: mem_free_cuda = mem_reserved' "${MGMT_FILE}"
+  echo "   Applied: 0 → mem_reserved fallback"
+else
+  echo "   Skipped (already applied or not found)"
 fi
 
 exit 0

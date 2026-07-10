@@ -38,11 +38,36 @@ services:
       - ../ComfyUI:/basedir
       # Keep container time in sync with the host
       - /etc/localtime:/etc/localtime:ro
+      # Global uv constraints (see UV_CONSTRAINT below and constraints.txt for why)
+      - ./constraints.txt:/comfy/mnt/constraints.txt:ro
     restart: unless-stopped
     environment:
+      # Applies constraints.txt to every install the init/userscripts run.
+      # Both vars are needed: most steps use `uv pip install` (UV_CONSTRAINT),
+      # but 11-onnxruntime-gpu.sh's wheel-restore path calls plain `pip install`
+      # directly (PIP_CONSTRAINT) — uv doesn't read PIP_CONSTRAINT or vice versa.
+      UV_CONSTRAINT: /comfy/mnt/constraints.txt
+      PIP_CONSTRAINT: /comfy/mnt/constraints.txt
       # ── PyTorch ─────────────────────────────────────────────────────────────
-      # Install PyTorch nightly for CUDA 13.1, required for the GB10 Blackwell.
-      PREINSTALL_TORCH_CMD: "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu130"
+      # Pinned to the STABLE cu130 index (download.pytorch.org/whl/cu130), not
+      # nightly — PyTorch now ships numbered cu130 releases (up to 2.13.0 as of
+      # 2026-07-09), so the nightly channel this originally targeted for GB10
+      # Blackwell support is no longer necessary and is far more volatile: its
+      # wheels are dev-dated, get pruned after a few weeks, and torchvision's
+      # nightly build always depends on the *preceding* day's torch build, so
+      # same-day version pins there silently fail to resolve.
+      # Also note: USE_UV=true makes the init script export UV_TORCH_BACKEND,
+      # which forces uv to resolve torch/torchvision/torchaudio from its own
+      # backend-selected index regardless of the --index-url given here — so
+      # this pin only resolves at all because it matches what that backend
+      # already serves. Don't repoint this at the nightly index without
+      # verifying resolution first (`uv pip install --dry-run ...`).
+      # This exact drift (a stale cu13x torch build) is what broke sageattention
+      # (ABI mismatch, undefined symbol) and sent the container into a
+      # crash-restart loop on 2026-07-09. When bumping this pin, rebuild
+      # sageattention against it: set FORCE_REINSTALL=true for one run of
+      # 20-SageAttention2.sh, then set it back to false.
+      PREINSTALL_TORCH_CMD: "torch==2.13.0+cu130 torchvision==0.28.0+cu130 torchaudio==2.11.0+cu130 --index-url https://download.pytorch.org/whl/cu130"
       TORCH_CUDA_ARCH_LIST: "12.1"
 
       # ── User identity ────────────────────────────────────────────────────────
@@ -101,22 +126,22 @@ services:
       CUDA_LAUNCH_BLOCKING: "1"
 
       # ── Grace-Blackwell unified memory tuning ────────────────────────────────
-      # Let the unified memory manager handle allocations instead of PyTorch's
-      # CUDA caching allocator, which doesn't understand the shared fabric.
-      CUDA_MANAGED_FORCE_DEVICE_ALLOC: "1"
       # torch.compile / Dynamo provide ~0% speedup on GB10 (compute-bound, not
       # kernel-launch-bound) and Triton does not yet support sm_121a. Disable both.
       TORCH_COMPILE_DISABLE: "1"
       TORCHDYNAMO_DISABLE: "1"
       # Load CUDA modules eagerly — faster first-inference after container start.
-      CUDA_MODULE_LOADING: "CUDA"
+      CUDA_MODULE_LOADING: "EAGER"
       # Tune OpenMP thread count to the Grace CPU core count.
       OMP_NUM_THREADS: "20"
+      # Enable expandable memory segments — required for large unified-memory GPUs
+      # so the caching allocator can grow segments on demand rather than pre-reserving.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
 
       # ── onnxruntime ──────────────────────────────────────────────────────────
       # After onnxruntime has been built from source successfully the first time,
       # uncomment the line below to stop it being rebuilt on every start.
-      # ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT: "true"
+      ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT: "true"
 
       # ── HuggingFace ──────────────────────────────────────────────────────────
       # Set HF_TOKEN=hf_... in the .env file — never commit the token.
@@ -126,6 +151,12 @@ services:
     # PyTorch recommended settings for GPU workloads:
     #   memlock -1  → no limit on locked-in-memory pages
     #   stack 64 MiB → matches PyTorch's recommended process stack size
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
     ulimits:
       memlock: -1
       stack: 67108864

@@ -1,0 +1,11 @@
+# Global uv constraints (applied via UV_CONSTRAINT to every `uv pip install` the
+# container's init/userscripts run).
+#
+# protobuf: onnxruntime-gpu's wheel (built from source, cached under
+# run/src/.../onnxruntime/build/.../dist/) declares an unpinned "protobuf"
+# dependency, so every restart that restores it (11-onnxruntime-gpu.sh, whenever
+# a custom node's requirements.txt reinstalls the CPU onnxruntime and it has to
+# be repaired) pulls the latest protobuf and silently breaks mediapipe, which
+# needs protobuf<5 (protobuf 5+ removed MessageFactory.GetPrototype). Keep this
+# pinned so that repair path can't regress mediapipe again.
+protobuf<5,>=4.25.3

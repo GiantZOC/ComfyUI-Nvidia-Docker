@@ -53,9 +53,32 @@ if pip show onnxruntime-gpu > /dev/null 2>&1; then
         # Case: GPU installed AND CPU installed -> Remove both, then install GPU
         echo "${LOG_WARN}Warning:${NC} Found BOTH onnxruntime and onnxruntime-gpu."
         if [ "$ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT" = "true" ]; then
-            echo "Uninstalling CPU to ensure clean GPU installation..."
             echo "${LOG_WARN}Warning:${NC} ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT is true. Keeping onnxruntime-gpu..."
+            echo "Uninstalling CPU onnxruntime..."
             pip uninstall -y onnxruntime || error_exit "Failed to uninstall onnxruntime"
+            # The CPU package overwrites the GPU package's Python files, so removing it leaves the
+            # Python layer (onnxruntime/__init__.py etc.) deleted. Reinstall from the pre-built wheel
+            # to restore those files without triggering a full rebuild.
+            if [ ! -f "/comfy/mnt/venv/lib/python3.12/site-packages/onnxruntime/__init__.py" ]; then
+                echo "${LOG_WARN}Warning:${NC} onnxruntime Python files missing after CPU removal — restoring from pre-built wheel..."
+                bb="/comfy/mnt/venv/.build_base.txt"
+                if [ -f "$bb" ]; then
+                    BUILD_BASE=$(cat "$bb")
+                    torch_version=$(pip3 show torch 2>/dev/null | grep Version | awk '{print $2}' | cut -d'.' -f1-2)
+                    existing_wheel=$(find "/comfy/mnt/src/${BUILD_BASE}/Torch_${torch_version}/onnxruntime/build/Linux/Release/dist" \
+                        -name "onnxruntime_gpu-*.whl" 2>/dev/null | head -1)
+                    if [ -n "$existing_wheel" ]; then
+                        pip install --force-reinstall "$existing_wheel" || error_exit "Failed to reinstall onnxruntime-gpu from wheel"
+                        echo "${LOG_OK}OK:${NC} onnxruntime-gpu Python files restored from $existing_wheel"
+                    else
+                        echo "${LOG_ERR}ERROR:${NC} No pre-built wheel found — onnxruntime will be broken. Set ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT=false to trigger a rebuild."
+                    fi
+                else
+                    echo "${LOG_ERR}ERROR:${NC} .build_base.txt not found — cannot locate wheel to restore onnxruntime-gpu."
+                fi
+            else
+                echo "${LOG_OK}OK:${NC} onnxruntime Python files still intact after CPU removal."
+            fi
             exit 0
         else
             echo "Uninstalling both to ensure clean GPU installation..."
