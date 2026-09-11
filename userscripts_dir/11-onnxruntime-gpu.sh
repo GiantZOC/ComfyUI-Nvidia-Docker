@@ -46,6 +46,65 @@ source /comfy/mnt/venv/bin/activate || error_exit "Failed to activate virtualenv
 
 echo "Checking for existing onnxruntime installations..."
 
+SITE_PACKAGES="/comfy/mnt/venv/lib/python3.12/site-packages"
+BUILD_BASE_FILE="/comfy/mnt/venv/.build_base.txt"
+
+# `pip show` only proves the dist-info survived. Uninstalling the CPU `onnxruntime` deletes the Python
+# layer shared with the GPU package (onnxruntime/__init__.py etc) while leaving onnxruntime_gpu's
+# dist-info behind, so the package still looks installed while `import onnxruntime` yields an empty
+# namespace package -- which surfaces as "module 'onnxruntime' has no attribute 'InferenceSession'".
+# Ask the interpreter instead of the package database.
+ort_python_layer_ok() {
+    python -c "import onnxruntime, sys; sys.exit(0 if onnxruntime.__file__ and hasattr(onnxruntime, 'InferenceSession') else 1)" >/dev/null 2>&1
+}
+
+# Reinstall the GPU package from the source-built wheel it originally came from, restoring the Python
+# layer without a rebuild (building from source on aarch64/GB10 takes a very long time).
+ort_restore_gpu_from_wheel() {
+    local ort_version wheel="" found
+    ort_version=$(pip show onnxruntime-gpu 2>/dev/null | awk '/^Version:/{print $2}')
+
+    # pip records the exact wheel it installed, so trust that provenance before guessing at a path
+    if [ -n "$ort_version" ] && [ -f "$SITE_PACKAGES/onnxruntime_gpu-${ort_version}.dist-info/direct_url.json" ]; then
+        wheel=$(python - "$SITE_PACKAGES/onnxruntime_gpu-${ort_version}.dist-info" <<'PY'
+import json, os, sys, urllib.parse
+try:
+    path = urllib.parse.urlparse(json.load(open(os.path.join(sys.argv[1], "direct_url.json")))["url"]).path
+    print(path if os.path.isfile(path) else "")
+except Exception:
+    print("")
+PY
+)
+    fi
+
+    if [ -z "$wheel" ] && [ -f "$BUILD_BASE_FILE" ]; then
+        # torch gets upgraded independently of this wheel, so the live torch version is not a reliable
+        # directory key -- search every Torch_* tree, preferring the version already installed.
+        local candidates
+        candidates=$(find "/comfy/mnt/src/$(cat "$BUILD_BASE_FILE")"/Torch_*/onnxruntime/build/Linux/Release/dist \
+            -name "onnxruntime_gpu-*.whl" 2>/dev/null | sort)
+        if [ -n "$ort_version" ]; then
+            found=$(echo "$candidates" | grep "/onnxruntime_gpu-${ort_version}-" || true)
+            [ -n "$found" ] && candidates="$found"
+        fi
+        wheel=$(echo "$candidates" | grep . | tail -1)
+    fi
+
+    if [ -z "$wheel" ]; then
+        echo "${LOG_ERR}ERROR:${NC} No pre-built onnxruntime-gpu wheel found under /comfy/mnt/src/*/*/onnxruntime/build/Linux/Release/dist — onnxruntime will be broken. Set ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT=false to trigger a rebuild."
+        return 1
+    fi
+
+    # --no-deps: the wheel's dependencies are unpinned, so re-resolving them here can move numpy/protobuf
+    # under a working venv. Only the package's own files are missing.
+    pip install --no-deps --force-reinstall "$wheel" || error_exit "Failed to reinstall onnxruntime-gpu from wheel"
+    if ! ort_python_layer_ok; then
+        echo "${LOG_ERR}ERROR:${NC} onnxruntime still not importable after installing $wheel"
+        return 1
+    fi
+    echo "${LOG_OK}OK:${NC} onnxruntime-gpu Python layer restored from $wheel"
+}
+
 # Check if onnxruntime-gpu is installed
 if pip show onnxruntime-gpu > /dev/null 2>&1; then
     # Check if standard onnxruntime (CPU) is ALSO installed
@@ -59,23 +118,9 @@ if pip show onnxruntime-gpu > /dev/null 2>&1; then
             # The CPU package overwrites the GPU package's Python files, so removing it leaves the
             # Python layer (onnxruntime/__init__.py etc.) deleted. Reinstall from the pre-built wheel
             # to restore those files without triggering a full rebuild.
-            if [ ! -f "/comfy/mnt/venv/lib/python3.12/site-packages/onnxruntime/__init__.py" ]; then
+            if ! ort_python_layer_ok; then
                 echo "${LOG_WARN}Warning:${NC} onnxruntime Python files missing after CPU removal — restoring from pre-built wheel..."
-                bb="/comfy/mnt/venv/.build_base.txt"
-                if [ -f "$bb" ]; then
-                    BUILD_BASE=$(cat "$bb")
-                    torch_version=$(pip3 show torch 2>/dev/null | grep Version | awk '{print $2}' | cut -d'.' -f1-2)
-                    existing_wheel=$(find "/comfy/mnt/src/${BUILD_BASE}/Torch_${torch_version}/onnxruntime/build/Linux/Release/dist" \
-                        -name "onnxruntime_gpu-*.whl" 2>/dev/null | head -1)
-                    if [ -n "$existing_wheel" ]; then
-                        pip install --force-reinstall "$existing_wheel" || error_exit "Failed to reinstall onnxruntime-gpu from wheel"
-                        echo "${LOG_OK}OK:${NC} onnxruntime-gpu Python files restored from $existing_wheel"
-                    else
-                        echo "${LOG_ERR}ERROR:${NC} No pre-built wheel found — onnxruntime will be broken. Set ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT=false to trigger a rebuild."
-                    fi
-                else
-                    echo "${LOG_ERR}ERROR:${NC} .build_base.txt not found — cannot locate wheel to restore onnxruntime-gpu."
-                fi
+                ort_restore_gpu_from_wheel || true
             else
                 echo "${LOG_OK}OK:${NC} onnxruntime Python files still intact after CPU removal."
             fi
@@ -87,8 +132,16 @@ if pip show onnxruntime-gpu > /dev/null 2>&1; then
     else
         # Case: GPU installed AND CPU NOT installed
         if [ "$FORCE_REINSTALL" = "false" ] || [ "$ONNXRUNTIME_DO_NOT_DELETE_GPU_IF_PRESENT" = "true" ]; then
-            echo "${LOG_INFO}INFO:${NC} onnxruntime-gpu is already installed and clean."
-            echo "     (Set FORCE_REINSTALL=true in script to force reinstall)"
+            # A previous boot (or a manual uninstall) can leave the Python layer deleted with only the
+            # dist-info remaining, so verify the import rather than trusting `pip show` -- otherwise the
+            # broken venv is declared clean on every restart and never repairs itself.
+            if ort_python_layer_ok; then
+                echo "${LOG_INFO}INFO:${NC} onnxruntime-gpu is already installed and clean."
+                echo "     (Set FORCE_REINSTALL=true in script to force reinstall)"
+            else
+                echo "${LOG_WARN}Warning:${NC} onnxruntime-gpu is installed but not importable — restoring from pre-built wheel..."
+                ort_restore_gpu_from_wheel || true
+            fi
             exit 0
         else
             pip uninstall -y onnxruntime-gpu || error_exit "Failed to uninstall onnxruntime-gpu"
