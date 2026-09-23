@@ -9,3 +9,21 @@
 # needs protobuf<5 (protobuf 5+ removed MessageFactory.GetPrototype). Keep this
 # pinned so that repair path can't regress mediapipe again.
 protobuf<5,>=4.25.3
+
+# --- Temporary pins for the 2026-09-23 ComfyUI engine upgrade ---
+# These lock the source-built GB10/Blackwell stack (hours to rebuild from
+# scratch) at its known-good pre-upgrade versions, so that init.bash's
+# automatic `requirements.txt` reinstall (USE_PIPUPGRADE=true runs with
+# --upgrade by default) can't silently bump/rebuild them while only the
+# ComfyUI application code (run/ComfyUI) is meant to change. torch/torchvision/
+# torchaudio are NOT pinned here on purpose -- UV_TORCH_BACKEND (from
+# USE_UV=true) resolves those from its own backend index regardless of any
+# constraint or explicit pin, so PREINSTALL_TORCH=false (see docker-compose.yml)
+# is the real guard for those three. Remove this whole block once the upgrade
+# is verified working and these are ready to float again.
+numpy==2.5.3
+onnxruntime-gpu==1.27.0
+xformers==0.0.35+6e9337c.d20260325
+sageattention==2.2.0
+sageattn3==1.0.0
+comfy-kitchen==0.2.35

@@ -69,6 +69,13 @@ services:
       # 20-SageAttention2.sh, then set it back to false.
       PREINSTALL_TORCH_CMD: "torch==2.13.0+cu130 torchvision==0.28.0+cu130 torchaudio==2.11.0+cu130 --index-url https://download.pytorch.org/whl/cu130"
       TORCH_CUDA_ARCH_LIST: "12.1"
+      # TEMPORARY for the 2026-09-23 ComfyUI engine upgrade: run/venv already
+      # has a known-good torch (2.14.0+cu130, confirmed live) and this upgrade
+      # only swaps run/ComfyUI's application code, not the Python environment.
+      # Skip the reinstall entirely rather than trust PREINSTALL_TORCH_CMD/
+      # constraints to hold it in place -- both are known to be bypassed by
+      # UV_TORCH_BACKEND. Remove this line once the upgrade is verified.
+      PREINSTALL_TORCH: "false"
 
       # ── User identity ────────────────────────────────────────────────────────
       # Match the host user so that files written by the container are owned by you.
@@ -94,15 +101,18 @@ services:
       #                        "RAM" before copying to "VRAM". On unified memory these are
       #                        the same pool, so mmap effectively doubles model memory
       #                        usage. Pair with the copy=False patch (01-unified-memory-patch.sh).
-      # --normalvram           Use ComfyUI's normal vram mode rather than letting it
-      #                        auto-detect (which falls to lowvram on GB10).
       # --reserve-vram 1       Reserve 1 GB for system use — improves stability under load.
       # --disable-pinned-memory Pinned memory is counterproductive on a unified memory
       #                        fabric; disabling it reduces bus overhead.
       # --dont-upcast-attention Keep attention ops in BF16/FP16 — no need to upcast on
       #                        a native BF16 chip.
       # --force-fp16           Enables the Flash Attention path in PyTorch.
-      COMFY_CMDLINE_EXTRA: "--normalvram --disable-dynamic-vram --reserve-vram 1 --disable-pinned-memory --disable-mmap --use-sage-attention --bf16-unet --bf16-vae --bf16-text-enc --dont-upcast-attention --force-fp16"
+      # NOTE (2026-09-23 upgrade to v0.37.1): --normalvram was REMOVED upstream.
+      # With Dynamic VRAM now the default (and --disable-dynamic-vram set below),
+      # ComfyUI falls back to "estimate based model loading" on its own — which is
+      # exactly the old --normalvram behavior — so dropping the flag is a no-op,
+      # not a behavior change. See comfy/cli_args.py's vram_group / is_dynamic_vram_enabled().
+      COMFY_CMDLINE_EXTRA: "--disable-dynamic-vram --reserve-vram 1 --disable-pinned-memory --disable-mmap --use-sage-attention --bf16-unet --bf16-vae --bf16-text-enc --dont-upcast-attention --force-fp16"
 
       # Expose all GPUs; 'video' capability is needed for libnvcuvid.so
       NVIDIA_VISIBLE_DEVICES: all
